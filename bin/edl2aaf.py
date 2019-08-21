@@ -30,7 +30,7 @@ def probe(path, show_packets=False):
     return json.loads(stdout.decode('utf8'))
 
 
-Clip = namedtuple("Clip", ['source_file', 'source_start', 'record_start', 'record_finish', 'original_edl_event'])
+Clip = namedtuple("Clip", ['source_file', 'source_start', 'record_start', 'record_finish', 'original_edl_event','lane'])
 
 
 class EDLConverter:
@@ -79,30 +79,51 @@ class EDLConverter:
             return False
 
     def _info_for_path(self, path):
-        if self.wavinfo_cache.get(path, None) is None:
+        if path not in self.wavinfo_cache:
             self.wavinfo_cache[path] = WavInfoReader(path)
         return self.wavinfo_cache[path]
 
     def _ffprobe_metadata_for_path(self, path):
-        if self.ffprobe_cache.get(path, None) is None:
+        if path not in self.ffprobe_cache:
             self.ffprobe_cache[path] = probe(path)
         return self.ffprobe_cache[path]
 
-    def valid_paths_for_edit_source(self, edit):
+    def default_lane_name_for_path(self, path):
+        """
+        Recommend a name for the lane this path should be on.
+        :param path:
+        :return:
+        """
+        info = self._info_for_path(path)
+        for track in info.ixml.track_list:
+            return track.channel_index
+
+        return ''
+
+    def source_paths_for_edit(self, edit):
+        """
+        Find files that are the correct source for this Edit
+        :param edit: a pycmx.Edit
+        :return: a list of os.pathlike things
+        """
         sources_and_info = [(path, self._info_for_path(path)) for path in self.source_files]
 
         def filterproc(path, info):
             return self._is_source_path_valid_for_edit(edit, path, info)
 
-        return filter(filterproc, sources_and_info)
+        file_set = filter(filterproc, sources_and_info)
+
+        return file_set
 
     def clips_for_edit_source(self, edit):
-        for matched_file in self.valid_paths_for_edit_source(edit):
-            info_for_path = self._info_for_path(matched_file)
+        matched_files = self.source_paths_for_edit(edit)
+        for matched_file in matched_files:
+            info_for_path: WavInfoReader = self._info_for_path(matched_file)
             fs = info_for_path.fmt.sample_rate
             file_timestamp_fs = info_for_path.bext.time_reference
             src_start_fs, _, rec_start_fs, rec_finish_fs = self._convert_edit_times_to_fs(edit, fs)
             clip_start_fs = src_start_fs - file_timestamp_fs
+
             yield Clip(source_file=matched_file, source_start=clip_start_fs,
                        record_start=rec_start_fs, record_finish=rec_finish_fs,
                        original_edl_event=edit)
@@ -126,8 +147,8 @@ class EDLConverter:
         used_list = set()
         for clip in self.clips():
             if clip.source_file not in used_list:
+                used_list.add(clip.source_file)
                 yield clip.source_file
-            used_list.add(clip.source_file)
 
     def convert(self):
         clips = list(self.clips())
@@ -137,7 +158,6 @@ class EDLConverter:
         assert len(source_paths) > 0, 'No linkable source files were found'
 
         source_map = {}
-        lane_map = {}
         with aaf2.open(path=self.output_file_name, mode='wb') as f:
             for source_path in source_paths:
                 metadata = self._ffprobe_metadata_for_path(source_path)
@@ -148,8 +168,19 @@ class EDLConverter:
             f.content.append(composition_mob)
 
             for channel in self.edit_list.channels:
+                lane_map = {}
+                slot_base_name = f"A{channel}"
                 for clip in clips:
-                    pass
+                    if channel in clip.original_edl_event.channels:
+                        source_info = self._info_for_path(clip.source_file)
+                        if source_info.ixml.channel_index is not None:
+                            lane_name = slot_base_name + '_' + source_info.ixml.channel_index
+                            slot = None
+                            if lane_name not in lane_map:
+                                slot = composition_mob.create_sound_slot(edit_rate=self.frame_rate)
+                            else:
+                                slot = composition_mob.slot_at(lane_map[lane_name])
+
 
 
 arg_parser = OptionParser()
@@ -159,6 +190,3 @@ arg_parser.add_option('--fs', dest='frame_rate')
 arg_parser.add_option('-o', '--output', dest='output_file')
 
 options, rest = arg_parser.parse_args()
-
-print(options)
-print(rest)
