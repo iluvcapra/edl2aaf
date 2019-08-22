@@ -1,6 +1,6 @@
 #
 #
-from typing import Optional, Any, Iterable, Dict, List
+from typing import Optional, Any, Iterable, Dict, List, Tuple
 
 import aaf2
 from wavinfo import WavInfoReader
@@ -140,7 +140,7 @@ class MatchedClip:
             yield SourceClipInstruction(lane=lane, edit=self.edit, source=source)
 
     @property
-    def source_files_with_lane_assignments(self) -> Iterable[(SourceFile, Lane)]:
+    def source_files_with_lane_assignments(self) -> Iterable[Tuple[SourceFile, Lane]]:
         lane_list = set()
         for channel in self.edit.channels:
             for source_file in self.sources:
@@ -150,6 +150,22 @@ class MatchedClip:
                     lane = lane.successor()
                 lane_list.add(lane)
                 yield source_file, lane
+
+
+def add_source_clips_to_lane(clips_this_lane, f, slot, source_map):
+    time_cursor = 0
+    for clip in clips_this_lane:
+        if clip.record_start > time_cursor:
+            filler_length = clip.record_start - time_cursor
+            filler = f.create.Filler(media_kind='sound', length=filler_length)
+            slot.segment.components.append(filler)
+            time_cursor = time_cursor + filler_length
+        master_mob: aaf2.mobs.MasterMob = source_map[clip.source.path]
+        source_slot = next((slot for slot in master_mob.slots if slot.media_kind == 'sound'), None)
+        source_clip = master_mob.create_source_clip(source_slot=source_slot,
+                                                    start=clip.source_start, length=clip.length, media_kind='sound')
+        slot.segment.components.append(source_clip)
+        time_cursor = time_cursor + clip.length
 
 
 class EDLAAFConverter:
@@ -175,22 +191,7 @@ class EDLAAFConverter:
                 clips_this_lane = marshalled_clips[lane]
                 slot: aaf2.mobslots.TimelineMobSlot = composition_mob.create_sound_slot(edit_rate=self.timecode_rate)
                 slot.name = lane.slot_name
-                self.add_source_clips_to_lane(clips_this_lane, f, slot, source_map)
-
-    def add_source_clips_to_lane(self, clips_this_lane, f, slot, source_map):
-        time_cursor = 0
-        for clip in clips_this_lane:
-            if clip.record_start > time_cursor:
-                filler_length = clip.record_start - time_cursor
-                filler = f.create.Filler(media_kind='sound', length=filler_length)
-                slot.segment.components.append(filler)
-                time_cursor = time_cursor + filler_length
-            master_mob: aaf2.mobs.MasterMob = source_map[clip.source.path]
-            source_slot = next((slot for slot in master_mob.slots if slot.media_kind == 'sound'), None)
-            source_clip = master_mob.create_source_clip(source_slot=source_slot,
-                                                        start=clip.source_start, length=clip.length, media_kind='sound')
-            slot.segment.components.append(source_clip)
-            time_cursor = time_cursor + clip.length
+                add_source_clips_to_lane(clips_this_lane, f, slot, source_map)
 
     def add_sources_to_aaf(self, f):
         source_map = {}
