@@ -3,6 +3,7 @@
     <words>
       <w>ffprobe</w>
       <w>filterproc</w>
+      <w>timecode</w>
       <w>wavinfo</w>
     </words>
   </dictionary>
