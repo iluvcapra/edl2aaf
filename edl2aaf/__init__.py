@@ -109,13 +109,14 @@ class Lane:
             return self.channel < other.channel
 
     def successor(self):
-        index_num = re.search("(^.*?)(\d+$)", self.lane)
+        index_num = re.search('(^.*?)([0-9]+$)', self.lane)
 
         if index_num is not None:
             numeric = int(index_num.group(2))
             return Lane(self.channel, index_num.group(1) + str(numeric + 1))
         else:
             return Lane(self.channel, self.lane + '.1')
+
 
 class SourceClipInstruction:
     def __init__(self, lane: Lane, edit: DecodedEdit, source: SourceFile):
@@ -131,41 +132,63 @@ class MatchedClip:
     def __init__(self, edit: DecodedEdit, source_files: Iterable[SourceFile]):
         self.edit = edit
         matching_files = filter(lambda f: f.match_for_clip(edit), source_files)
-        self.sources = sourceFilesWithLaneAssignments(matching_files, edit)
+        self.sources = list(matching_files)
 
+    @property
     def source_clip_instructions(self) -> Iterable[SourceClipInstruction]:
-        for (source, lane) in self.sources:
+        for (source, lane) in self.source_files_with_lane_assignments:
             yield SourceClipInstruction(lane=lane, edit=self.edit, source=source)
 
-def sourceFilesWithLaneAssignments(source_files: Iterable[SourceFile], edit: DecodedEdit) -> [(SourceFile, Lane)]:
-    lane_list = set()
-    retval = []
-    for channel in edit.channels:
-        for source_file in source_files:
-            trial = source_file.recommended_lane_name or ""
-            lane = Lane(channel=channel, lane=trial)
-            while lane in lane_list:
-                lane = lane.successor()
-            lane_list.add(lane)
-            retval.append((source_file, lane))
-    return retval
+    @property
+    def source_files_with_lane_assignments(self) -> Iterable[(SourceFile, Lane)]:
+        lane_list = set()
+        for channel in self.edit.channels:
+            for source_file in self.sources:
+                trial = source_file.recommended_lane_name or ""
+                lane = Lane(channel=channel, lane=trial)
+                while lane in lane_list:
+                    lane = lane.successor()
+                lane_list.add(lane)
+                yield source_file, lane
 
-def used_file_list(source_clip_instructions: Iterable[SourceClipInstruction]) -> Iterable[SourceFile]:
-    uniq_files = set()
-    for file in map(lambda i: i.source, source_clip_instructions):
-        if file not in uniq_files:
-            uniq_files.add(file)
-            yield file
 
-def marshall_clips_to_lanes(source_clip_instructions: Iterable[SourceClipInstruction]) -> Dict[Lane, List[SourceClipInstruction]]:
-    lane_map: Dict[Lane, List[SourceClipInstruction]] = {}
-    for sci in source_clip_instructions:
-        if sci.lane not in lane_map:
-            lane_map[sci.lane] = []
+class EDLAAFConverter:
+    def __init__(self, source_file_paths: Iterable[str], edl: pycmx.parse_cmx_events.EditList, timecode_rate: int):
+        self.source_file_paths = source_file_paths
+        self.edl = edl
+        self.timecode_rate = timecode_rate
 
-        lane_map[sci.lane].append(sci)
+    @property
+    def source_files(self):
+        return map(SourceFile, self.source_file_paths)
 
-    for lane in lane_map:
-        lane_map[lane] = sorted(lane_map[lane], key=lambda i: i.record_start)
+    @property
+    def decoded_events(self) -> Iterable[DecodedEdit]:
+        edits = itertools.chain.from_iterable([event.edits for event in self.edl.events])
+        return map(DecodedEdit, zip(edits, itertools.repeat(self.timecode_rate)))
 
-    return lane_map
+    @property
+    def source_clip_instructions(self) -> Iterable[SourceClipInstruction]:
+        matched_clips = map(MatchedClip, zip(self.decoded_events, itertools.repeat(self.source_files)))
+        return itertools.chain.from_iterable([m.source_clip_instructions for m in matched_clips])
+
+    @property
+    def used_files(self) -> Iterable[SourceFile]:
+        uniq_files = set()
+        for file in map(lambda i: i.source, self.source_clip_instructions):
+            if file not in uniq_files:
+                uniq_files.add(file)
+                yield file
+
+    def marshall_clips_to_lanes(self) -> Dict[Lane, List[SourceClipInstruction]]:
+        lane_map: Dict[Lane, List[SourceClipInstruction]] = {}
+        for sci in self.source_clip_instructions:
+            if sci.lane not in lane_map:
+                lane_map[sci.lane] = []
+
+            lane_map[sci.lane].append(sci)
+
+        for lane in lane_map:
+            lane_map[lane] = sorted(lane_map[lane], key=lambda i: i.record_start)
+
+        return lane_map
