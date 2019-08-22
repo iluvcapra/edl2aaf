@@ -182,6 +182,7 @@ class EDLAAFConverter:
             source_map = self.add_sources_to_aaf(f)
 
             composition_mob: aaf2.mobs.CompositionMob = f.create.CompositionMob(name=self.composition_name)
+            composition_mob.usage = 'Usage_TopLevel'
             f.content.append(composition_mob)
 
             marshalled_clips = self.marshall_clips_to_lanes()
