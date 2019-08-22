@@ -1,15 +1,16 @@
 #
 #
-from typing import Optional, Any
+from typing import Optional, Any, Iterable, Dict, List
 
 from wavinfo import WavInfoReader
 import pycmx
 from timecode import Timecode
-
+from functools import total_ordering
+import itertools
 import subprocess
 import json
 import os.path
-
+from collections import namedtuple
 import re
 
 
@@ -41,14 +42,19 @@ class SourceFile:
         self.info = WavInfoReader(path)
         self.probe = probe()
 
+    def __hash__(self):
+        return hash(self.path)
+
+    def __eq__(self, other):
+        return self.path == other.path
+
     @property
     def recommended_lane_name(self) -> Optional[Any]:
-        track_1 = next(self.info.ixml.track_list,None)
+        track_1 = next(self.info.ixml.track_list, None)
         if track_1 is not None and track_1.channel_index is not None:
             return track_1.channel_index
 
         return None
-
 
     def match_for_clip(self, edit: DecodedEdit) -> bool:
         """
@@ -77,6 +83,7 @@ class SourceFile:
             return False
 
 
+@total_ordering
 class Lane:
     def __init__(self, channel, lane):
         self.channel = channel
@@ -91,6 +98,9 @@ class Lane:
             return self.slot_name == other.slot_name
         else:
             return False
+
+    def __hash__(self):
+        return hash(self.slot_name)
 
     def __lt__(self, other):
         if self.channel == other.channel:
@@ -107,9 +117,55 @@ class Lane:
         else:
             return Lane(self.channel, self.lane + '.1')
 
+class SourceClipInstruction:
+    def __init__(self, lane: Lane, edit: DecodedEdit, source: SourceFile):
+        self.lane = lane
+        self.source_start = edit.source_in
+        self.record_start = edit.record_in
+        self.length = edit.source_out - edit.source_in
+        self.source = source
+        self.name = edit.clip_name or os.path.basename(source.path)
 
-def DecodedEditsWithSourceFiles(source_files: [SourceFile], edits: [DecodedEdit]) -> iter((DecodedEdit, [SourceFile])):
-    for edit in edits:
+
+class MatchedClip:
+    def __init__(self, edit: DecodedEdit, source_files: Iterable[SourceFile]):
+        self.edit = edit
         matching_files = filter(lambda f: f.match_for_clip(edit), source_files)
-        yield (edit, matching_files)
+        self.sources = sourceFilesWithLaneAssignments(matching_files, edit)
 
+    def source_clip_instructions(self) -> Iterable[SourceClipInstruction]:
+        for (source, lane) in self.sources:
+            yield SourceClipInstruction(lane=lane, edit=self.edit, source=source)
+
+def sourceFilesWithLaneAssignments(source_files: Iterable[SourceFile], edit: DecodedEdit) -> [(SourceFile, Lane)]:
+    lane_list = set()
+    retval = []
+    for channel in edit.channels:
+        for source_file in source_files:
+            trial = source_file.recommended_lane_name or ""
+            lane = Lane(channel=channel, lane=trial)
+            while lane in lane_list:
+                lane = lane.successor()
+            lane_list.add(lane)
+            retval.append((source_file, lane))
+    return retval
+
+def used_file_list(source_clip_instructions: Iterable[SourceClipInstruction]) -> Iterable[SourceFile]:
+    uniq_files = set()
+    for file in map(lambda i: i.source, source_clip_instructions):
+        if file not in uniq_files:
+            uniq_files.add(file)
+            yield file
+
+def marshall_clips_to_lanes(source_clip_instructions: Iterable[SourceClipInstruction]) -> Dict[Lane, List[SourceClipInstruction]]:
+    lane_map: Dict[Lane, List[SourceClipInstruction]] = {}
+    for sci in source_clip_instructions:
+        if sci.lane not in lane_map:
+            lane_map[sci.lane] = []
+
+        lane_map[sci.lane].append(sci)
+
+    for lane in lane_map:
+        lane_map[lane] = sorted(lane_map[lane], key=lambda i: i.record_start)
+
+    return lane_map
