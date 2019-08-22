@@ -2,6 +2,7 @@
 #
 from typing import Optional, Any, Iterable, Dict, List
 
+import aaf2
 from wavinfo import WavInfoReader
 import pycmx
 from timecode import Timecode
@@ -10,7 +11,6 @@ import itertools
 import subprocess
 import json
 import os.path
-from collections import namedtuple
 import re
 
 
@@ -153,10 +153,44 @@ class MatchedClip:
 
 
 class EDLAAFConverter:
-    def __init__(self, source_file_paths: Iterable[str], edl: pycmx.parse_cmx_events.EditList, timecode_rate: int):
+    def __init__(self, source_file_paths: Iterable[str], edl: pycmx.parse_cmx_events.EditList,
+                 timecode_rate: int, out_file=None, composition_name=None):
         self.source_file_paths = source_file_paths
         self.edl = edl
         self.timecode_rate = timecode_rate
+        self.composition_name = composition_name or self.edl.title
+        self.out_file = out_file or self.composition_name + '.aaf'
+
+    def convert(self):
+        with aaf2.open(self.out_file, 'wb') as f:
+            source_map = self.add_sources_to_aaf(f)
+
+            composition_mob: aaf2.mobs.CompositionMob = f.create.CompositionMob(name=self.composition_name)
+            f.content.append(composition_mob)
+
+            marshalled_clips = self.marshall_clips_to_lanes()
+            lanes = sorted(marshalled_clips.keys())
+
+            for lane in lanes:
+                slot: aaf2.mobslots.TimelineMobSlot = composition_mob.create_sound_slot(edit_rate=self.timecode_rate)
+                slot.name = lane.slot_name
+
+                time_cursor = 0
+                for clip in marshalled_clips[lane]:
+                    if clip.record_start > time_cursor:
+                        filler_length = clip.record_start - time_cursor
+                        # todo add filler here
+                        time_cursor = time_cursor + filler_length
+                    # todo add source clip here
+                    time_cursor = time_cursor + clip.length
+
+    def add_sources_to_aaf(self, f):
+        source_map = {}
+        for source_file in self.used_files:
+            master_mob, _, _ = f.content.create_ama_link(source_file.path, source_file.probe)
+            source_map[source_file.path] = master_mob.mob_id
+
+        return source_map
 
     @property
     def source_files(self):
@@ -174,10 +208,10 @@ class EDLAAFConverter:
 
     @property
     def used_files(self) -> Iterable[SourceFile]:
-        uniq_files = set()
+        unique_files = set()
         for file in map(lambda i: i.source, self.source_clip_instructions):
-            if file not in uniq_files:
-                uniq_files.add(file)
+            if file not in unique_files:
+                unique_files.add(file)
                 yield file
 
     def marshall_clips_to_lanes(self) -> Dict[Lane, List[SourceClipInstruction]]:
